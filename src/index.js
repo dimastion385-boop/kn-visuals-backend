@@ -168,7 +168,31 @@ export default {
     // --------------------------------------------------
     // AUTHENTICATION
     // --------------------------------------------------
+if (path === "/api/ai-test" && req.method === "GET") {
+  try {
+    const result = await env.AI.run(
+      "@cf/meta/llama-3.1-8b-instruct",
+      {
+        messages: [
+          {
+            role: "user",
+            content: "Ответь одним словом: работает?"
+          }
+        ]
+      }
+    );
 
+    return json({
+      ok: true,
+      answer: result.response || result
+    });
+  } catch (e) {
+    return json({
+      ok: false,
+      error: String(e)
+    }, 500);
+  }
+}
     const user = await auth(req, env);
 
     if (!user) {
