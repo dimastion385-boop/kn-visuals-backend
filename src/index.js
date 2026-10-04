@@ -14,11 +14,9 @@ const sha256 = async (text) => {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
 
   return [...new Uint8Array(digest)]
-    .map(b => b.toString(16).padStart(2, "0"))
+    .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 };
-
-const token = () => crypto.randomUUID();
 
 async function body(req) {
   try {
@@ -29,54 +27,112 @@ async function body(req) {
 }
 
 async function auth(req, env) {
-  const h = req.headers.get("authorization") || "";
+  const header = req.headers.get("authorization") || "";
 
-  if (!h.startsWith("Bearer ")) {
+  if (!header.startsWith("Bearer ")) {
     return null;
   }
 
-  const t = h.slice(7);
+  const token = header.slice(7).trim();
 
-  const row = await env.DB.prepare(
+  if (!/^\d+$/.test(token)) {
+    return null;
+  }
+
+  const user = await env.DB.prepare(
     "SELECT id, username, plan FROM users WHERE id = ?"
   )
-    .bind(Number(t))
+    .bind(Number(token))
     .first();
 
-  return row || null;
+  return user || null;
+}
+
+async function runAI(env, prompt) {
+  const result = await env.AI.run(
+    "@cf/meta/llama-3.1-8b-instruct-fp8",
+    {
+      messages: [
+        {
+          role: "system",
+          content:
+            "Ты AI-помощник приложения KN Visuals. Отвечай понятно и кратко."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      max_tokens: 256,
+      temperature: 0.6
+    }
+  );
+
+  return result?.response || "";
 }
 
 export default {
   async fetch(req, env) {
     if (req.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "access-control-allow-origin": "*",
-          "access-control-allow-headers": "content-type, authorization",
-          "access-control-allow-methods": "GET,POST,OPTIONS"
-        }
-      });
+      return new Response(null, { status: 204 });
     }
 
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // --------------------------------------------------
+    // =========================
     // HEALTH
-    // --------------------------------------------------
+    // =========================
 
-    if (path === "/api/health") {
+    if (path === "/api/health" && req.method === "GET") {
       return json({
         ok: true,
         service: "KN Visuals Backend",
-        ai: !!env.AI
+        ai: !!env.AI,
+        db: !!env.DB
       });
     }
 
-    // --------------------------------------------------
+    // =========================
+    // AI TEST
+    // Открывается обычной ссылкой
+    // =========================
+
+    if (path === "/api/ai-test" && req.method === "GET") {
+      if (!env.AI) {
+        return json(
+          {
+            ok: false,
+            error: "Workers AI binding is missing"
+          },
+          500
+        );
+      }
+
+      try {
+        const answer = await runAI(
+          env,
+          "Ответь одним коротким предложением: AI работает?"
+        );
+
+        return json({
+          ok: true,
+          answer
+        });
+      } catch (error) {
+        return json(
+          {
+            ok: false,
+            error: String(error)
+          },
+          500
+        );
+      }
+    }
+
+    // =========================
     // REGISTER
-    // --------------------------------------------------
+    // =========================
 
     if (path === "/api/register" && req.method === "POST") {
       const b = await body(req);
@@ -84,10 +140,19 @@ export default {
       const username = String(b.username || "").trim();
       const password = String(b.password || "");
 
-      if (username.length < 3 || password.length < 6) {
+      if (username.length < 3) {
         return json(
           {
-            error: "Username >= 3, password >= 6"
+            error: "Username must contain at least 3 characters"
+          },
+          400
+        );
+      }
+
+      if (password.length < 6) {
+        return json(
+          {
+            error: "Password must contain at least 6 characters"
           },
           400
         );
@@ -111,9 +176,9 @@ export default {
       const hash = await sha256(password);
 
       const result = await env.DB.prepare(
-        "INSERT INTO users (username,password_hash) VALUES (?,?)"
+        "INSERT INTO users (username, password_hash, plan) VALUES (?, ?, ?)"
       )
-        .bind(username, hash)
+        .bind(username, hash, "free")
         .run();
 
       return json(
@@ -126,9 +191,9 @@ export default {
       );
     }
 
-    // --------------------------------------------------
+    // =========================
     // LOGIN
-    // --------------------------------------------------
+    // =========================
 
     if (path === "/api/login" && req.method === "POST") {
       const b = await body(req);
@@ -139,7 +204,7 @@ export default {
       const hash = await sha256(password);
 
       const user = await env.DB.prepare(
-        "SELECT id,username,plan FROM users WHERE username=? AND password_hash=?"
+        "SELECT id, username, plan FROM users WHERE username = ? AND password_hash = ?"
       )
         .bind(username, hash)
         .first();
@@ -153,46 +218,22 @@ export default {
         );
       }
 
-      // Prototype token:
-      // user ID is used as Bearer token.
-      // Replace with signed short-lived tokens before production.
-
       return json({
         ok: true,
+
+        // Prototype token.
+        // Перед production лучше заменить на подписанный JWT.
         token: String(user.id),
+
         userId: user.id,
         plan: user.plan
       });
     }
 
-    // --------------------------------------------------
-    // AUTHENTICATION
-    // --------------------------------------------------
-if (path === "/api/ai-test" && req.method === "GET") {
-  try {
-    const result = await env.AI.run(
-      "@cf/meta/llama-3.1-8b-instruct",
-      {
-        messages: [
-          {
-            role: "user",
-            content: "Ответь одним словом: работает?"
-          }
-        ]
-      }
-    );
+    // =========================
+    // AUTH
+    // =========================
 
-    return json({
-      ok: true,
-      answer: result.response || result
-    });
-  } catch (e) {
-    return json({
-      ok: false,
-      error: String(e)
-    }, 500);
-  }
-}
     const user = await auth(req, env);
 
     if (!user) {
@@ -204,9 +245,9 @@ if (path === "/api/ai-test" && req.method === "GET") {
       );
     }
 
-    // --------------------------------------------------
-    // CURRENT USER
-    // --------------------------------------------------
+    // =========================
+    // ME
+    // =========================
 
     if (path === "/api/me" && req.method === "GET") {
       return json({
@@ -216,9 +257,64 @@ if (path === "/api/ai-test" && req.method === "GET") {
       });
     }
 
-    // --------------------------------------------------
-    // VIP LICENSE CHECK
-    // --------------------------------------------------
+    // =========================
+    // AI
+    // =========================
+
+    if (path === "/api/ai" && req.method === "POST") {
+      if (!env.AI) {
+        return json(
+          {
+            ok: false,
+            error: "Workers AI binding is missing"
+          },
+          500
+        );
+      }
+
+      const b = await body(req);
+      const prompt = String(b.prompt || "").trim();
+
+      if (!prompt) {
+        return json(
+          {
+            error: "Prompt is required"
+          },
+          400
+        );
+      }
+
+      if (prompt.length > 4000) {
+        return json(
+          {
+            error: "Prompt is too long"
+          },
+          400
+        );
+      }
+
+      try {
+        const answer = await runAI(env, prompt);
+
+        return json({
+          ok: true,
+          answer,
+          plan: user.plan
+        });
+      } catch (error) {
+        return json(
+          {
+            ok: false,
+            error: String(error)
+          },
+          500
+        );
+      }
+    }
+
+    // =========================
+    // LICENSE CHECK
+    // =========================
 
     if (path === "/api/license/check" && req.method === "POST") {
       const b = await body(req);
@@ -228,12 +324,15 @@ if (path === "/api/ai-test" && req.method === "GET") {
 
       if (!key) {
         return json({
-          valid: false
+          valid: false,
+          reason: "empty_key"
         });
       }
 
       const license = await env.DB.prepare(
-        "SELECT id,plan,active,device_id,user_id FROM licenses WHERE license_key=?"
+        `SELECT id, plan, active, device_id, user_id
+         FROM licenses
+         WHERE license_key = ?`
       )
         .bind(key)
         .first();
@@ -245,7 +344,10 @@ if (path === "/api/ai-test" && req.method === "GET") {
         });
       }
 
-      if (license.user_id && license.user_id !== user.id) {
+      if (
+        license.user_id !== null &&
+        license.user_id !== user.id
+      ) {
         return json({
           valid: false,
           reason: "assigned_to_other_user"
@@ -263,9 +365,13 @@ if (path === "/api/ai-test" && req.method === "GET") {
         });
       }
 
+      // Первый успешный вход по ключу
+      // привязывает ключ к пользователю и устройству.
       if (!license.user_id) {
         await env.DB.prepare(
-          "UPDATE licenses SET user_id=?,device_id=? WHERE id=?"
+          `UPDATE licenses
+           SET user_id = ?, device_id = ?
+           WHERE id = ?`
         )
           .bind(
             user.id,
@@ -276,12 +382,9 @@ if (path === "/api/ai-test" && req.method === "GET") {
       }
 
       await env.DB.prepare(
-        "UPDATE users SET plan=? WHERE id=?"
+        "UPDATE users SET plan = ? WHERE id = ?"
       )
-        .bind(
-          license.plan,
-          user.id
-        )
+        .bind(license.plan, user.id)
         .run();
 
       return json({
@@ -290,77 +393,16 @@ if (path === "/api/ai-test" && req.method === "GET") {
       });
     }
 
-    // --------------------------------------------------
-    // AI ASSISTANT
-    // --------------------------------------------------
-
-    if (path === "/api/ai" && req.method === "POST") {
-      const b = await body(req);
-
-      const prompt = String(
-        b.prompt || ""
-      ).trim();
-
-      if (!prompt) {
-        return json(
-          {
-            error: "Prompt is required"
-          },
-          400
-        );
-      }
-
-      if (!env.AI) {
-        return json(
-          {
-            error: "Workers AI binding is not configured"
-          },
-          500
-        );
-      }
-
-      try {
-        const result = await env.AI.run(
-          "@cf/meta/llama-3.1-8b-instruct",
-          {
-            messages: [
-              {
-                role: "system",
-                content:
-                  "Ты AI Assistant приложения KN Visuals. Отвечай на русском языке. Помогай пользователю настраивать визуальные параметры приложения, производительность и интерфейс. Не предлагай функции, которые требуют вмешательства в чужие приложения или обхода системных ограничений."
-              },
-              {
-                role: "user",
-                content: prompt
-              }
-            ]
-          }
-        );
-
-        return json({
-          ok: true,
-          answer: result.response || ""
-        });
-      } catch (error) {
-        return json(
-          {
-            error: "AI request failed",
-            details: String(
-              error?.message || error
-            )
-          },
-          500
-        );
-      }
-    }
-
-    // --------------------------------------------------
-    // GET CONFIGS
-    // --------------------------------------------------
+    // =========================
+    // CONFIGS GET
+    // =========================
 
     if (path === "/api/configs" && req.method === "GET") {
       const rows = await env.DB.prepare(
-        "SELECT name,config_json,updated_at FROM configs WHERE user_id=? ORDER BY name"
+        `SELECT name, config_json, updated_at
+         FROM configs
+         WHERE user_id = ?
+         ORDER BY name`
       )
         .bind(user.id)
         .all();
@@ -370,20 +412,15 @@ if (path === "/api/ai-test" && req.method === "GET") {
       });
     }
 
-    // --------------------------------------------------
-    // SAVE CONFIG
-    // --------------------------------------------------
+    // =========================
+    // CONFIGS SAVE
+    // =========================
 
     if (path === "/api/configs" && req.method === "POST") {
       const b = await body(req);
 
-      const name = String(
-        b.name || ""
-      ).trim();
-
-      const config = JSON.stringify(
-        b.config ?? {}
-      );
+      const name = String(b.name || "").trim();
+      const config = JSON.stringify(b.config ?? {});
 
       if (!name || name.length > 64) {
         return json(
@@ -395,17 +432,16 @@ if (path === "/api/ai-test" && req.method === "GET") {
       }
 
       await env.DB.prepare(
-        `INSERT INTO configs(user_id,name,config_json,updated_at)
-         VALUES(?,?,?,CURRENT_TIMESTAMP)
-         ON CONFLICT(user_id,name) DO UPDATE SET
-         config_json=excluded.config_json,
-         updated_at=CURRENT_TIMESTAMP`
+        `INSERT INTO configs
+          (user_id, name, config_json, updated_at)
+         VALUES
+          (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id, name)
+         DO UPDATE SET
+          config_json = excluded.config_json,
+          updated_at = CURRENT_TIMESTAMP`
       )
-        .bind(
-          user.id,
-          name,
-          config
-        )
+        .bind(user.id, name, config)
         .run();
 
       return json({
@@ -413,34 +449,10 @@ if (path === "/api/ai-test" && req.method === "GET") {
       });
     }
 
-    // --------------------------------------------------
+    // =========================
     // NOT FOUND
-    // --------------------------------------------------
-if (path === "/api/ai-test" && req.method === "GET") {
-  try {
-    const result = await env.AI.run(
-      "@cf/meta/llama-3.1-8b-instruct",
-      {
-        messages: [
-          {
-            role: "user",
-            content: "Ответь коротко: AI работает?"
-          }
-        ]
-      }
-    );
+    // =========================
 
-    return json({
-      ok: true,
-      answer: result.response || result
-    });
-  } catch (e) {
-    return json({
-      ok: false,
-      error: String(e)
-    }, 500);
-  }
-}
     return json(
       {
         error: "Not found"
