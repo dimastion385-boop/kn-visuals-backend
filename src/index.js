@@ -392,7 +392,31 @@ export default {
     // --------------------------------------------------
     // NOT FOUND
     // --------------------------------------------------
+if (path === "/api/ai-test" && req.method === "GET") {
+  try {
+    const result = await env.AI.run(
+      "@cf/meta/llama-3.1-8b-instruct",
+      {
+        messages: [
+          {
+            role: "user",
+            content: "Ответь коротко: AI работает?"
+          }
+        ]
+      }
+    );
 
+    return json({
+      ok: true,
+      answer: result.response || result
+    });
+  } catch (e) {
+    return json({
+      ok: false,
+      error: String(e)
+    }, 500);
+  }
+}
     return json(
       {
         error: "Not found"
