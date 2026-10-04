@@ -233,7 +233,39 @@ export default {
     // =========================
     // AUTH
     // =========================
+if (path === "/api/ai-screen" && req.method === "POST") {
+  const b = await body(req);
 
+  const prompt = String(
+    b.prompt || "Опиши, что видно на изображении."
+  ).slice(0, 2000);
+
+  const image = String(b.image || "");
+
+  if (!image) {
+    return json({ ok: false, error: "image_required" }, 400);
+  }
+
+  try {
+    const result = await env.AI.run(
+      "@cf/meta/llama-3.2-11b-vision-instruct",
+      {
+        prompt,
+        image
+      }
+    );
+
+    return json({
+      ok: true,
+      result
+    });
+  } catch (e) {
+    return json({
+      ok: false,
+      error: String(e)
+    }, 502);
+  }
+}
     const user = await auth(req, env);
 
     if (!user) {
